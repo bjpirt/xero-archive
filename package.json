@@ -1,0 +1,28 @@
+{
+  "name": "xero-archive",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Extract and archive historical financial data from Xero to local JSON, download attachments, and generate a browsable HTML microsite.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "auth": "tsx src/cli.ts auth",
+    "archive": "tsx src/cli.ts archive",
+    "history": "tsx src/cli.ts history",
+    "adopt-attachments": "tsx src/cli.ts adopt-attachments",
+    "site": "tsx src/cli.ts site",
+    "all": "tsx src/cli.ts all",
+    "serve": "tsx src/cli.ts serve",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "tsx": "^4.16.0",
+    "typescript": "^5.5.0"
+  }
+}

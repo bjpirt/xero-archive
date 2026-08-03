@@ -25,12 +25,19 @@ npm run site        # generate the microsite into site/
 npm run serve       # static server for site/ + data/, opens the browser
 npm run all         # archive + site + serve
 npm run typecheck   # tsc --noEmit  (there is no build step — tsx runs TS directly)
+npm test            # node:test via tsx
+npm run test:watch  # same, in watch mode
+npm run test:coverage
+npm run check       # typecheck + test — run this before finishing
 ```
 
 `npm run history -- --refresh` re-fetches all history from scratch.
 
-There is **no test framework** and **no compile step**. Everything runs through `tsx`.
-Validate changes with `npm run typecheck` plus a manual smoke test (see below).
+There is **no compile step** — everything runs through `tsx`. Tests use **Node's built-in
+runner** (`node:test` + `node:assert/strict`) executed through `tsx`, so the test framework adds
+**zero dependencies**. Don't introduce Vitest or Jest: the minimal-dependency rule below applies
+to dev dependencies too, and `node --import tsx --test` already gives globs, watch mode, a spec
+reporter and coverage.
 
 ## Runtime & conventions
 
@@ -200,6 +207,56 @@ command (reads the org name from `raw/organisation.json`; tenantId isn't needed 
 - The redirect URI in `.env` must exactly match the one registered on the Xero app, and its
   port must equal `AUTH_CALLBACK_PORT`.
 
+## Architecture: dependency injection, not global patching
+
+The I/O seams are **constructor-injected**, and that's deliberate — tests must never patch
+globals (`globalThis.fetch = …`) or reach for a mocking library.
+
+- **`XeroClient`** (`client.ts`) takes `{ fetch, sleep, now, getAccessToken }`, all defaulted to
+  the real thing. `sleep` and `now` are what make the rate limiter and retry backoffs testable:
+  a test's `sleep` advances its fake clock instead of waiting, so the 60-calls-per-minute window
+  is exercised in microseconds. Call counters and the lowest observed daily quota are **instance**
+  state (they were module-level `let`s, which leaked between tests and between runs in a process).
+- **`XeroAuth`** (`auth.ts`) takes `{ fetch, now, tokens, openBrowser }`. `tokens` is a
+  `TokenStore` — `fileTokenStore()` in production, `memoryTokenStore()` in tests, so no test can
+  touch the real `.tokens.json`. `getAccessToken` is injected *into* the client, which also breaks
+  the auth↔client import cycle.
+- **`Archiver`** (`archive.ts`) takes `{ client, auth, options, createStore }`. `options` is an
+  `ArchiveOptions` snapshot rather than reads of `CONFIG`, so tests vary behaviour without
+  touching `process.env`; `createStore` lets them archive into a temp directory.
+- **`cli.ts` is the composition root** — the single place real dependencies are wired together
+  (`buildArchiver()`). Keep it that way: modules receive collaborators, they don't reach for them.
+- `store.ts` is deliberately *not* abstracted behind an fs interface. Disk **is** the archive's
+  state, so tests use a real temp directory (`Store`'s third constructor arg) — faking `fs` would
+  only test the fake.
+- `log.setSilent(true)` suppresses output; test files call it so progress chatter doesn't drown
+  the report. `LOG_LEVEL=silent` does the same for a scripted run.
+
+## Testing
+
+**Always run `npm run check` (typecheck + tests) before considering any work complete.** Not
+"when it seems risky" — every time, including for changes that look trivial or documentation-only.
+If a change makes a test fail, decide which is wrong and fix that; never leave a failing or
+skipped test behind. If you change behaviour deliberately, update the test in the same change.
+New behaviour needs a test that would fail without it.
+
+Tests live beside their subject as `src/*.test.ts`. Coverage sits around 96% of lines;
+`npm run test:coverage` prints the table.
+
+What's deliberately **not** covered, and why:
+
+- `XeroAuth.login()`'s callback server and browser launch — needs a real socket and a browser.
+  Everything it depends on (scope negotiation, `tokenAuth`, `toTokenSet`, `scopeHint`) is tested.
+- `site.ts` and `src/assets/app.js` — the client-side SPA has no unit tests yet. Extracting its
+  pure view-model logic (formatting, pagination maths, link resolution, hash parsing) into an
+  importable module is the intended next step; until then verify the site by hand.
+- `serve.ts` — verify the path guard by hand (see below).
+
+Regressions worth keeping tests for, because each was a real bug: the `X-DayLimit-Remaining`
+header being absent must not zero the quota; `X-Rate-Limit-Problem: daily` must throw rather than
+sleep for hours; 429s must be retry-capped rather than looping forever; attachment markers must
+compare dates format-agnostically so pre-migration markers still match.
+
 ## The microsite
 
 - `site/assets/app.js` is a **dependency-free vanilla SPA** with hash routing
@@ -223,17 +280,19 @@ command (reads the org name from `raw/organisation.json`; tenantId isn't needed 
 - Editing the SPA: change `src/assets/app.js` / `style.css` (the source of truth). `site.ts`
   copies them into `site/assets/` on every `npm run site`.
 
-## Testing / verifying changes
+## Verifying end-to-end (the parts without unit tests)
 
-There's no automated suite. To verify end-to-end without live Xero credentials, write a
-throwaway `_smoke.ts` at the project root that uses `Store` to fabricate a small archive
-(organisation + a few records + an attachment + history + a report), call `generateSite()`,
-then `npm run serve` and check pages over HTTP. Delete the fixture (`rm -f _smoke*.ts` and
-`rm -rf data site`) and stop the server afterwards. This is how the site generator, client
-app, server, and path guard were validated. Always run `npm run typecheck` before finishing.
+`npm run check` covers the archival code. For the site generator, client app, server and path
+guard, verify by hand without live Xero credentials: write a throwaway `_smoke.ts` at the project
+root that uses `Store` to fabricate a small archive in a **temp directory** (organisation, a few
+records, an attachment, some history, a report), call `generateSite()`, then `npm run serve` and
+check pages over HTTP. Delete the fixture (`rm -f _smoke*.ts`) and stop the server afterwards.
+
+Never point a throwaway script at the user's real `data/` or `.tokens.json`.
 
 ## Gotchas checklist when editing
 
+- **Run `npm run check` before saying you're done.** Every time.
 - Resume is disk-derived — there is **no state file**. Don't reintroduce one; add a
   disk-derivation helper on `Store` (like `maxJournalNumber`/`hasHistory`) instead.
 - Keep `writeHistory` writing even empty `[]` — it's the "attempted" marker that makes history

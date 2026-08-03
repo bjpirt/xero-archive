@@ -15,7 +15,11 @@
     "site": "tsx src/cli.ts site",
     "all": "tsx src/cli.ts all",
     "serve": "tsx src/cli.ts serve",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test --test-reporter=spec \"src/**/*.test.ts\" \"src/**/*.test.js\"",
+    "test:watch": "node --import tsx --test --watch \"src/**/*.test.ts\" \"src/**/*.test.js\"",
+    "test:coverage": "node --import tsx --test --experimental-test-coverage \"src/**/*.test.ts\" \"src/**/*.test.js\"",
+    "check": "npm run typecheck && npm test"
   },
   "dependencies": {
     "dotenv": "^16.4.5"

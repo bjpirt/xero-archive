@@ -1,6 +1,7 @@
 import path from "node:path";
-import { login } from "./auth";
-import { runArchive, runHistoryBackfill, adoptAttachments } from "./archive";
+import { XeroAuth } from "./auth";
+import { XeroClient } from "./client";
+import { Archiver, adoptAttachments } from "./archive";
 import { generateSite, generateLanding, findArchivedStores } from "./site";
 import { serve } from "./serve";
 import { Store } from "./store";
@@ -21,6 +22,16 @@ async function buildSites(stores: Store[]): Promise<void> {
   log.ok(`Landing page: site/index.html (${landing.length} org(s))`);
 }
 
+/**
+ * Composition root: the one place real dependencies are wired together. Everything
+ * downstream receives its collaborators, which is what makes them testable.
+ */
+function buildArchiver(): Archiver {
+  const auth = new XeroAuth();
+  const client = new XeroClient({ getAccessToken: () => auth.getAccessToken() });
+  return new Archiver({ client, auth });
+}
+
 async function main(): Promise<void> {
   const cmd = process.argv[2] ?? "help";
   const flags = process.argv.slice(3);
@@ -30,16 +41,16 @@ async function main(): Promise<void> {
 
   switch (cmd) {
     case "auth":
-      await login();
+      await new XeroAuth().login();
       break;
 
     case "archive":
-      await runArchive();
+      await buildArchiver().run();
       log.ok("Archive complete. Build the site with `npm run site`.");
       break;
 
     case "history":
-      await runHistoryBackfill(flags.includes("--refresh"));
+      await buildArchiver().backfillHistory(flags.includes("--refresh"));
       break;
 
     case "adopt-attachments":
@@ -52,7 +63,7 @@ async function main(): Promise<void> {
       break;
 
     case "all": {
-      const stores = await runArchive();
+      const stores = await buildArchiver().run();
       await buildSites(stores);
       log.info("Starting local server…");
       serve();

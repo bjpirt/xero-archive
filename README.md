@@ -182,6 +182,30 @@ The client throttles to stay under the minute/concurrency limits and honours `Re
 429s. If it nears the **daily** cap it stops cleanly and saves progress — just run it again
 later and it resumes where it left off (`DAILY_LIMIT_BUFFER` controls the headroom).
 
+## Development
+
+```bash
+npm test              # Node's built-in test runner, via tsx
+npm run test:watch
+npm run test:coverage
+npm run typecheck
+npm run check         # typecheck + tests
+```
+
+Tests use `node:test` and `node:assert/strict` run through `tsx`, so they add **no dependencies** —
+the only devDependencies are `tsx`, `typescript` and `@types/node`. They live beside their subject
+as `src/*.test.ts` and cover ~96% of the archival code's lines.
+
+The I/O boundaries are injected rather than patched: `XeroClient` takes its `fetch`, `sleep`,
+clock and token provider; `XeroAuth` takes a `TokenStore` (so tests never touch your real
+`.tokens.json`); `Archiver` takes its client, connection source and store factory. A test's
+`sleep` advances its own fake clock, which is how the 60-calls-per-minute throttle and the retry
+backoffs get exercised in milliseconds. `cli.ts` is the only place real dependencies are wired
+together.
+
+The client-side SPA (`src/assets/app.js`) has no unit tests yet — verify the site by hand with
+`npm run serve`.
+
 ## Notes & limitations
 
 - **Journals** is a premium (Advanced-tier) endpoint that also needs a Xero security

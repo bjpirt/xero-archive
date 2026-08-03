@@ -1,12 +1,17 @@
-import { request, XeroHttpError, apiUsage } from "./client";
-import { CONFIG } from "./config";
+import { XeroClient, XeroHttpError } from "./client";
 import { Store } from "./store";
 import { log } from "./log";
 import { parseXeroDate } from "./util";
 
+/** Report granularity and start year, injected so tests don't need env vars. */
+export interface ReportOptions {
+  reportPeriod: "year" | "month";
+  reportFromYear: number;
+}
+
 /** Scans archived transactions to find the earliest financial year present. */
-async function earliestYear(store: Store): Promise<number> {
-  if (CONFIG.reportFromYear > 0) return CONFIG.reportFromYear;
+export async function earliestYear(store: Store, fromYear: number): Promise<number> {
+  if (fromYear > 0) return fromYear;
   let min: Date | null = null;
   const consider = (v: unknown) => {
     const d = parseXeroDate(v);
@@ -19,14 +24,14 @@ async function earliestYear(store: Store): Promise<number> {
   return min ? (min as Date).getUTCFullYear() : fallback;
 }
 
-interface Period {
+export interface Period {
   label: string;
   fromDate: string;
   toDate: string;
   asAt: string;
 }
 
-function periodsFor(fromYear: number, granularity: "year" | "month"): Period[] {
+export function periodsFor(fromYear: number, granularity: "year" | "month"): Period[] {
   const now = new Date();
   const thisYear = now.getUTCFullYear();
   const out: Period[] = [];
@@ -55,11 +60,15 @@ function periodsFor(fromYear: number, granularity: "year" | "month"): Period[] {
  * for every period. Each needs the "reports" user role plus its own granular scope;
  * a 403 skips that one kind, not the whole pass.
  */
-export async function archiveReports(store: Store): Promise<void> {
+export async function archiveReports(
+  client: XeroClient,
+  store: Store,
+  options: ReportOptions,
+): Promise<void> {
   log.step("Reports (P&L, Balance Sheet, Trial Balance)");
-  const fromYear = await earliestYear(store);
-  const periods = periodsFor(fromYear, CONFIG.reportPeriod);
-  log.info(`Snapshotting ${periods.length} period(s) from ${fromYear} (${CONFIG.reportPeriod}).`);
+  const fromYear = await earliestYear(store, options.reportFromYear);
+  const periods = periodsFor(fromYear, options.reportPeriod);
+  log.info(`Snapshotting ${periods.length} period(s) from ${fromYear} (${options.reportPeriod}).`);
 
   // Each report now has its own granular scope, so one being unavailable must not
   // cost us the others. Give up on a kind after its first 403 rather than
@@ -68,9 +77,9 @@ export async function archiveReports(store: Store): Promise<void> {
 
   const pull = async (kind: string, path: string, query: Record<string, string>, label: string) => {
     if (forbidden.has(kind)) return;
-    log.progress(`reports: ${kind} ${label}${apiUsage()}`);
+    log.progress(`reports: ${kind} ${label}${client.apiUsage()}`);
     try {
-      const res = await request(store.tenantId, path, { query });
+      const res = await client.request(store.tenantId, path, { query });
       const report = res.json?.Reports?.[0] ?? res.json;
       await store.writeReport(kind, label, report);
     } catch (e) {

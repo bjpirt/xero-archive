@@ -1,15 +1,22 @@
 import { getConnections } from "./auth";
-import { request, paginate, XeroHttpError, dayLimitRemaining, apiUsage } from "./client";
+import {
+  request,
+  paginate,
+  XeroHttpError,
+  DailyLimitReached,
+  dayLimitRemaining,
+  apiUsage,
+} from "./client";
+import { nextAttemptHint } from "./util";
 import { CONFIG } from "./config";
 import { ALL_ENDPOINTS, type Endpoint } from "./endpoints";
 import { archiveReports } from "./reports";
 import { Store, safeName } from "./store";
 import { log } from "./log";
 
-/** Thrown to unwind cleanly when we're about to exhaust the daily API quota. */
-class DailyLimitReached extends Error {}
-
 function checkDailyBudget(): void {
+  // No reset time: we're stopping on our own buffer, so Xero hasn't 429'd us and
+  // hasn't told us when the window reopens.
   if (dayLimitRemaining <= CONFIG.dailyLimitBuffer) throw new DailyLimitReached();
 }
 
@@ -102,9 +109,14 @@ async function fetchHistory(store: Store, ep: Endpoint, records: any[]): Promise
 }
 
 /**
- * Pulls an endpoint in full every run. Writes are idempotent (same <id>.json is
- * overwritten), so a re-run simply refreshes records and fills any gaps — no
- * modified-since watermark, hence nothing to persist between runs.
+ * Pulls one endpoint's records in full every run. Writes are idempotent (same
+ * <id>.json is overwritten), so a re-run simply refreshes records and fills any
+ * gaps — no modified-since watermark, hence nothing to persist between runs.
+ *
+ * Records only: attachments and history are separate passes over what's on disk.
+ * A record list costs ~1 call per 1000 records while attachments cost one call per
+ * document, so interleaving them let a single entity's attachments exhaust the daily
+ * quota before later entities had been listed at all.
  */
 async function archiveEndpoint(store: Store, ep: Endpoint): Promise<void> {
   let total = 0;
@@ -121,8 +133,6 @@ async function archiveEndpoint(store: Store, ep: Endpoint): Promise<void> {
       await store.writeRecord(ep.name, id, rec);
       total++;
     }
-    if (ep.attachments) await downloadAttachments(store, ep, items);
-    if (ep.history && CONFIG.includeHistory) await fetchHistory(store, ep, items);
     if (items.length > 0) log.progress(`${ep.name}: ${total} record(s)${apiUsage()}`);
     checkDailyBudget();
   };
@@ -185,6 +195,21 @@ async function archiveJournals(store: Store): Promise<void> {
   }
 }
 
+/**
+ * Attachments for one endpoint, driven off the records already on disk rather than
+ * a live page — so this pass is independent of the record pass and resumes on its own.
+ */
+async function archiveAttachmentsFor(store: Store, ep: Endpoint): Promise<void> {
+  const records = await store.readEntity(ep.name);
+  if (records.length === 0) return;
+  await downloadAttachments(store, ep, records);
+}
+
+/**
+ * Phases, cheapest and most valuable first, so a run cut short by the daily quota
+ * leaves the most useful archive: every record list, then the ledger, then reports,
+ * and only then the per-document attachment calls that dominate the budget.
+ */
 async function archiveTenant(conn: { tenantId: string; tenantName: string }): Promise<Store> {
   log.step(`Organisation: ${conn.tenantName}`);
   const store = new Store(conn.tenantId, conn.tenantName);
@@ -194,16 +219,36 @@ async function archiveTenant(conn: { tenantId: string; tenantName: string }): Pr
     const orgRes = await request(conn.tenantId, "/Organisation");
     await store.writeSingle("organisation", orgRes.json?.Organisations?.[0] ?? orgRes.json);
 
-    for (const ep of ALL_ENDPOINTS) {
-      await archiveEndpoint(store, ep);
+    if (!CONFIG.attachmentsOnly) {
+      log.step("Records");
+      for (const ep of ALL_ENDPOINTS) {
+        await archiveEndpoint(store, ep);
+      }
+      await archiveJournals(store);
+      if (CONFIG.includeReports) await archiveReports(store);
     }
-    await archiveJournals(store);
-    if (CONFIG.includeReports) await archiveReports(store);
+
+    if (!CONFIG.skipAttachments) {
+      const withAttachments = ALL_ENDPOINTS.filter((e) => e.attachments);
+      log.step(`Attachments (${withAttachments.length} entit${withAttachments.length === 1 ? "y" : "ies"})`);
+      for (const ep of withAttachments) {
+        await archiveAttachmentsFor(store, ep);
+      }
+      log.progressDone();
+    }
+
+    if (CONFIG.includeHistory) {
+      log.step("History (inline)");
+      for (const ep of ALL_ENDPOINTS.filter((e) => e.history)) {
+        await fetchHistory(store, ep, await store.readEntity(ep.name));
+      }
+      log.progressDone();
+    }
   } catch (e) {
     if (e instanceof DailyLimitReached) {
-      log.warn(
-        "Approaching the daily API limit — stopping early. Progress is on disk; re-run later to resume.",
-      );
+      log.progressDone();
+      log.warn(`Daily API limit reached — stopping early.${apiUsage()}`);
+      log.warn(nextAttemptHint(e.resetsAt));
     } else {
       log.error(`Archive failed for ${conn.tenantName}: ${(e as Error).message}`);
       throw e;
@@ -339,10 +384,8 @@ export async function runHistoryBackfill(refresh = false): Promise<void> {
     } catch (e) {
       log.progressDone();
       if (e instanceof DailyLimitReached) {
-        log.warn(
-          `Daily API limit reached after ${done} document(s) — progress is on disk. ` +
-            "Re-run `npm run history` (e.g. tomorrow) to continue.",
-        );
+        log.warn(`Daily API limit reached after ${done} document(s) — progress is on disk.`);
+        log.warn(nextAttemptHint(e.resetsAt));
       } else {
         throw e;
       }

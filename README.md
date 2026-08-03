@@ -56,6 +56,14 @@ npm run site              # generate the microsite into site/
 npm run serve             # serve site/ locally and open it
 ```
 
+On a 1,000-call/day plan a large org won't finish in one run. The phases can be split across
+days, cheapest first:
+
+```bash
+npm run archive -- --skip-attachments    # every record list + ledger + reports (~30 calls)
+npm run archive -- --attachments-only    # then spend the rest of the quota on attachments
+```
+
 ### Attachments downloaded before markers existed
 
 If you archived attachments with an older version of this tool, run this once so the next
@@ -146,6 +154,11 @@ There's no state file to lose or corrupt: re-running resumes purely from what's 
 
 - Record lists are re-pulled in full each run and overwrite in place (cheap, and it can't
   leave a permanent gap the way a modified-since watermark can).
+- **Phase order matters on a daily quota.** A run does *every* record list first, then the
+  ledger, then reports, and only then attachments. A record list costs about one call per 1,000
+  records; attachments cost one call per document. Interleaving them (as earlier versions did)
+  let one entity's attachments exhaust the day's quota before later entities were listed at
+  all, so you'd have complete invoice attachments but no idea what bank transactions existed.
 - Journals resume from the highest `JournalNumber` already stored on disk.
 - Attachments are skipped if the file already exists locally. A marker under
   `raw/_attachments/` records the file set listed for each document, so a re-run also skips the
@@ -156,7 +169,11 @@ There's no state file to lose or corrupt: re-running resumes purely from what's 
 - History is skipped if the document already has a history file (empty histories are written
   as `[]` so they count as done and aren't re-fetched).
 
-If a run stops at the daily API limit, just run it again — it continues from disk.
+If a run stops at the daily API limit, just run it again — it continues from disk. It also
+tells you when to come back, if Xero told *it*: the daily window is a fixed window that
+[resets at a tenant-specific time](https://developer.xero.com/documentation/guides/oauth2/limits),
+disclosed only through `Retry-After` on a real 429. Stopping early on `DAILY_LIMIT_BUFFER`
+never sees that header, so set `DAILY_LIMIT_BUFFER=0` if you want the exact reset time.
 
 ### Rate limits
 
@@ -191,6 +208,8 @@ later and it resumes where it left off (`DAILY_LIMIT_BUFFER` controls the headro
 | `AUTH_CALLBACK_PORT` | `5173` | Local callback port (match the redirect URI) |
 | `INCLUDE_HISTORY` | `false` | Pull audit trail inline during archive (prefer `npm run history`) |
 | `REFRESH_ATTACHMENTS` | `false` | Re-list attachments already recorded as complete (same as `--refresh-attachments`) |
+| `SKIP_ATTACHMENTS` | `false` | Records, ledger and reports only (same as `--skip-attachments`) |
+| `ATTACHMENTS_ONLY` | `false` | Only the attachment pass (same as `--attachments-only`) |
 | `INCLUDE_REPORTS` | `true` | Snapshot P&L / Balance Sheet / Trial Balance |
 | `REPORT_PERIOD` | `year` | `year` or `month` report granularity |
 | `REPORT_FROM_YEAR` | auto | Earliest year to snapshot reports from |

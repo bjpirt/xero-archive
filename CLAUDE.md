@@ -51,7 +51,7 @@ Validate changes with `npm run typecheck` plus a manual smoke test (see below).
 
 ```
 cli.ts ──► auth.ts        PKCE login, token store, silent refresh, GET /connections
-       ├─► archive.ts     orchestration (this is the core)
+       ├─► archive.ts     orchestration: records → journals → reports → attachments → history
        │     ├─ endpoints.ts   declarative catalog of every resource
        │     ├─ client.ts      rate-limited fetch + pagination (429/5xx retry)
        │     ├─ store.ts       filesystem writes + disk-derived resume points
@@ -62,6 +62,15 @@ cli.ts ──► auth.ts        PKCE login, token store, silent refresh, GET /co
 ```
 
 `src/util.ts` holds shared helpers (Xero date parsing, money/HTML formatting).
+
+**Phase order is deliberate and load-bearing.** `archiveTenant` runs *all* record lists, then
+Journals, then reports, and only then attachments (and inline history last). A record list is
+~1 call per 1000 records; an attachment list is 1 call *per document*. Interleaving them — as
+earlier versions did, inside `archiveEndpoint`'s page handler — meant one entity's attachments
+could burn the whole daily quota before later entities were even listed. The attachment and
+history passes read records back off disk (`store.readEntity`), so they're independent of the
+record pass and resume on their own. `--skip-attachments` / `--attachments-only`
+(`CONFIG.skipAttachments` / `attachmentsOnly`) split the phases across daily quotas.
 
 **The endpoint catalog (`endpoints.ts`) drives everything.** To add or change what gets
 archived, edit that catalog — `archive.ts` and `site.ts` iterate it. Each entry declares
@@ -144,6 +153,17 @@ command (reads the org name from `raw/organisation.json`; tenantId isn't needed 
   `DailyLimitReached` and stop cleanly; because progress is on disk, the next run resumes.
   **Preserve this resumability** in any change to the fetch loops — write each file as it's
   fetched, and never rely on end-of-run bookkeeping.
+- `X-DayLimit-Remaining` must only be trusted **when the header is present** — `Number(null)`
+  is `0` and `Number.isFinite(0)` is true, so a response omitting it (binary attachment
+  downloads may) would clamp `dayLimitRemaining` to 0 and abort the run with a bogus
+  "daily limit reached". `client.ts` null-checks the raw header first; keep that.
+- **The daily window resets at a *tenant-specific* time** — it is **not** midnight UTC and
+  cannot be computed. Xero reveals it only via `Retry-After` on a real 429. So
+  `DailyLimitReached` (defined in `client.ts`) carries an optional `resetsAt`, `client.ts`
+  **throws instead of sleeping** when `X-Rate-Limit-Problem` is `daily` (a multi-hour sleep
+  reads as a hang), and `nextAttemptHint()` in `util.ts` says the time is unknown when we
+  stopped on our own `DAILY_LIMIT_BUFFER` rather than inventing one. Note the header value is
+  `daily`, which does **not** contain the substring "day" — match it carefully.
 - **Attachments:** list via `GET /{Entity}/{id}/Attachments` (only when the record's
   `HasAttachments === true`), download the raw bytes via
   `GET /{Entity}/{id}/Attachments/{filename}` with `Accept: */*`. There is no bulk listing, so
@@ -192,6 +212,14 @@ command (reads the org name from `raw/organisation.json`; tenantId isn't needed 
   `.env`/`.tokens.json`. Keep that guard intact.
 - Per-entity display columns live in the `VIEWS` map in `site.ts`; unknown entities fall back
   to `genericView`. `app.js` is generic and reads columns from the generated `manifest.json`.
+- **Cross-entity links are declared in `site.ts`, never hardcoded in `app.js`.** A `Column` may
+  carry `link` (→ that record's page, or its filtered list when matching a non-id field like an
+  account `Code`); a view may declare `related` (child arrays that are documents in their own
+  right, e.g. an invoice's `Payments`) and `backlinks` (the reverse direction, rendered as
+  `?link=<path>:<value>` filters — `[]` in the path marks an array hop). `app.js` silently drops
+  any link whose target entity wasn't archived, so a partial archive still renders.
+- List views paginate via `?p=` / `?size=`; `parseHash`/`hashFor`/`withParams` in `app.js` own
+  the query string, so add new list state as a param rather than module-level state.
 - Editing the SPA: change `src/assets/app.js` / `style.css` (the source of truth). `site.ts`
   copies them into `site/assets/` on every `npm run site`.
 
@@ -215,5 +243,8 @@ app, server, and path guard were validated. Always run `npm run typecheck` befor
   `site.ts`); the rest is driven off the catalog.
 - Touching fetch loops → write each file as it's fetched and keep `DailyLimitReached` handling
   so runs stay resumable purely from disk.
-- Any Xero date field → go through `parseXeroDate`.
+- Any Xero date field → go through `parseXeroDate`. Records are stored with dates already
+  converted to ISO 8601: `Store`'s writers all funnel through `normaliseDates()`, so nothing in
+  `data/` keeps the `/Date(…)/` wire format. Keep new writers going through that helper, and
+  keep readers tolerant of both forms (older archives, and live API responses, still use it).
 - Keep changes read-only against Xero — this tool never writes to the user's accounts.

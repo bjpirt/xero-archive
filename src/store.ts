@@ -2,6 +2,12 @@ import { mkdir, readFile, writeFile, readdir, stat } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { DATA_DIR } from "./config";
+import { normaliseDates, toIsoDate } from "./util";
+
+/** Serialises for disk, converting Xero's `/Date(…)/` strings to ISO 8601 first. */
+function json(obj: unknown): string {
+  return JSON.stringify(normaliseDates(obj), null, 2);
+}
 
 /** Filesystem-safe folder name for a tenant. */
 export function slug(name: string): string {
@@ -107,7 +113,11 @@ export class Store {
     if (!existsSync(file)) return false;
     try {
       const idx = JSON.parse(readFileSync(file, "utf8"));
-      if (idx.updatedDateUTC !== String(updatedDateUTC ?? "")) return false;
+      // Normalise both sides: markers written before dates were stored as ISO hold
+      // the `/Date(…)/` form, and the live record is whatever Xero just sent.
+      if (String(toIsoDate(idx.updatedDateUTC)) !== String(toIsoDate(updatedDateUTC) ?? "")) {
+        return false;
+      }
       return (idx.files as string[]).every((f) => this.hasAttachment(entity, docId, f));
     } catch {
       return false; // unreadable marker — re-list
@@ -127,30 +137,31 @@ export class Store {
   ): Promise<void> {
     const file = this.attachmentIndexPath(entity, docId);
     await mkdir(path.dirname(file), { recursive: true });
-    await writeFile(
-      file,
-      JSON.stringify({ updatedDateUTC: String(updatedDateUTC ?? ""), files }, null, 2),
-    );
+    await writeFile(file, json({ updatedDateUTC: String(toIsoDate(updatedDateUTC) ?? ""), files }));
   }
 
   // --- writers ---------------------------------------------------------------
 
-  /** Writes one record as raw/<entity>/<id>.json. */
+  /**
+   * Writes one record as raw/<entity>/<id>.json. Every writer runs the payload
+   * through `normaliseDates` so nothing on disk keeps Xero's `/Date(…)/` wire
+   * format — this is the single choke point for that.
+   */
   async writeRecord(entity: string, id: string, obj: unknown): Promise<void> {
     const dir = path.join(this.rawDir, entity);
     await mkdir(dir, { recursive: true });
-    await writeFile(path.join(dir, `${safeName(id)}.json`), JSON.stringify(obj, null, 2));
+    await writeFile(path.join(dir, `${safeName(id)}.json`), json(obj));
   }
 
   /** Writes a single top-level document, raw/<name>.json. */
   async writeSingle(name: string, obj: unknown): Promise<void> {
-    await writeFile(path.join(this.rawDir, `${name}.json`), JSON.stringify(obj, null, 2));
+    await writeFile(path.join(this.rawDir, `${name}.json`), json(obj));
   }
 
   async writeReport(kind: string, label: string, obj: unknown): Promise<void> {
     const dir = path.join(this.reportsDir, kind);
     await mkdir(dir, { recursive: true });
-    await writeFile(path.join(dir, `${safeName(label)}.json`), JSON.stringify(obj, null, 2));
+    await writeFile(path.join(dir, `${safeName(label)}.json`), json(obj));
   }
 
   /**
@@ -161,7 +172,7 @@ export class Store {
   async writeHistory(entity: string, id: string, obj: unknown): Promise<void> {
     const dir = path.join(this.rawDir, "_history", entity);
     await mkdir(dir, { recursive: true });
-    await writeFile(path.join(dir, `${safeName(id)}.json`), JSON.stringify(obj, null, 2));
+    await writeFile(path.join(dir, `${safeName(id)}.json`), json(obj));
   }
 
   attachmentPath(entity: string, docId: string, filename: string): string {

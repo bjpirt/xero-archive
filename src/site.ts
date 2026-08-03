@@ -8,10 +8,40 @@ import { log } from "./log";
 
 /** Column type hints the client uses for formatting. */
 type ColType = "text" | "date" | "money" | "badge";
+
+/**
+ * Turns a cell into a link to another archived record. `idKey` is a dot path on
+ * *this* record holding the target's key. Without `by` that key is the target's
+ * own id and we link straight to its detail page; with `by` we can't know the
+ * target's id (e.g. we hold an account *code*), so we link to its list filtered
+ * on that field instead. Either way `app.js` drops the link if the target entity
+ * wasn't archived.
+ */
+interface Link {
+  entity: string;
+  idKey: string;
+  by?: string;
+}
 interface Column {
   key: string; // supports dot paths, e.g. "Contact.Name"
   label: string;
   type?: ColType;
+  link?: Link;
+}
+/** A child array on the record whose entries are documents in their own right. */
+interface Related {
+  label: string;
+  entity: string;
+  arrayKey: string;
+  idKey: string;
+  columns: Column[];
+}
+/** The reverse direction: other records pointing *at* this one. */
+interface Backlink {
+  label: string;
+  entity: string;
+  path: string; // path on the other entity, `[]` marks an array hop
+  valueKey?: string; // field on *this* record they match (default: its idField)
 }
 interface View {
   label: string;
@@ -19,7 +49,67 @@ interface View {
   titleField?: string;
   dateField?: string;
   columns: Column[];
+  related?: Related[];
+  backlinks?: Backlink[];
 }
+
+/** Every transactional entity carries the same Contact shape. */
+const contactCol = (label = "Contact"): Column => ({
+  key: "Contact.Name",
+  label,
+  link: { entity: "Contacts", idKey: "Contact.ContactID" },
+});
+
+const accountCol = (key: string, label: string): Column => ({
+  key: `${key}.Name`,
+  label,
+  link: { entity: "Accounts", idKey: `${key}.AccountID` },
+});
+
+/** Line items reference accounts by code, not id. Shared by every entity that has them. */
+const JOURNAL_LINE_COLUMNS: Column[] = [
+  { key: "AccountCode", label: "Account", link: { entity: "Accounts", idKey: "AccountCode", by: "Code" } },
+  { key: "AccountName", label: "Name" },
+  { key: "Description", label: "Description" },
+  { key: "TaxType", label: "Tax" },
+  { key: "NetAmount", label: "Net", type: "money" },
+  { key: "TaxAmount", label: "Tax", type: "money" },
+  { key: "GrossAmount", label: "Gross", type: "money" },
+];
+
+const LINE_ITEM_COLUMNS: Column[] = [
+  { key: "Description", label: "Description" },
+  { key: "Quantity", label: "Qty" },
+  { key: "UnitAmount", label: "Unit", type: "money" },
+  { key: "AccountCode", label: "Account", link: { entity: "Accounts", idKey: "AccountCode", by: "Code" } },
+  { key: "TaxType", label: "Tax" },
+  { key: "TaxAmount", label: "Tax amt", type: "money" },
+  { key: "LineAmount", label: "Amount", type: "money" },
+];
+
+const PAYMENT_RELATED: Related = {
+  label: "Payments",
+  entity: "Payments",
+  arrayKey: "Payments",
+  idKey: "PaymentID",
+  columns: [
+    { key: "Date", label: "Date", type: "date" },
+    { key: "Amount", label: "Amount", type: "money" },
+    { key: "Reference", label: "Reference" },
+  ],
+};
+
+/** Documents that hang off a contact — used for the reverse links on Contacts. */
+const CONTACT_BACKLINKS: Backlink[] = [
+  "Invoices",
+  "CreditNotes",
+  "BankTransactions",
+  "PurchaseOrders",
+  "Quotes",
+  "Overpayments",
+  "Prepayments",
+  "RepeatingInvoices",
+].map((entity) => ({ label: entity, entity, path: "Contact.ContactID" }));
 
 const VIEWS: Record<string, View> = {
   Invoices: {
@@ -27,12 +117,46 @@ const VIEWS: Record<string, View> = {
     columns: [
       { key: "Type", label: "Type", type: "badge" },
       { key: "InvoiceNumber", label: "Number" },
-      { key: "Contact.Name", label: "Contact" },
+      contactCol(),
       { key: "Date", label: "Date", type: "date" },
       { key: "DueDate", label: "Due", type: "date" },
       { key: "Total", label: "Total", type: "money" },
       { key: "AmountDue", label: "Due", type: "money" },
       { key: "Status", label: "Status", type: "badge" },
+    ],
+    related: [
+      PAYMENT_RELATED,
+      {
+        label: "Credit notes",
+        entity: "CreditNotes",
+        arrayKey: "CreditNotes",
+        idKey: "CreditNoteID",
+        columns: [
+          { key: "CreditNoteNumber", label: "Number" },
+          { key: "Date", label: "Date", type: "date" },
+          { key: "AppliedAmount", label: "Applied", type: "money" },
+        ],
+      },
+      {
+        label: "Prepayments",
+        entity: "Prepayments",
+        arrayKey: "Prepayments",
+        idKey: "PrepaymentID",
+        columns: [
+          { key: "Date", label: "Date", type: "date" },
+          { key: "AppliedAmount", label: "Applied", type: "money" },
+        ],
+      },
+      {
+        label: "Overpayments",
+        entity: "Overpayments",
+        arrayKey: "Overpayments",
+        idKey: "OverpaymentID",
+        columns: [
+          { key: "Date", label: "Date", type: "date" },
+          { key: "AppliedAmount", label: "Applied", type: "money" },
+        ],
+      },
     ],
   },
   CreditNotes: {
@@ -40,18 +164,19 @@ const VIEWS: Record<string, View> = {
     columns: [
       { key: "Type", label: "Type", type: "badge" },
       { key: "CreditNoteNumber", label: "Number" },
-      { key: "Contact.Name", label: "Contact" },
+      contactCol(),
       { key: "Date", label: "Date", type: "date" },
       { key: "Total", label: "Total", type: "money" },
       { key: "Status", label: "Status", type: "badge" },
     ],
+    related: [PAYMENT_RELATED],
   },
   BankTransactions: {
     label: "Bank Transactions", idField: "BankTransactionID", dateField: "Date",
     columns: [
       { key: "Type", label: "Type", type: "badge" },
-      { key: "Contact.Name", label: "Contact" },
-      { key: "BankAccount.Name", label: "Bank Account" },
+      contactCol(),
+      accountCol("BankAccount", "Bank Account"),
       { key: "Date", label: "Date", type: "date" },
       { key: "Total", label: "Total", type: "money" },
       { key: "Reference", label: "Reference" },
@@ -62,8 +187,8 @@ const VIEWS: Record<string, View> = {
     label: "Bank Transfers", idField: "BankTransferID", dateField: "Date",
     columns: [
       { key: "Date", label: "Date", type: "date" },
-      { key: "FromBankAccount.Name", label: "From" },
-      { key: "ToBankAccount.Name", label: "To" },
+      accountCol("FromBankAccount", "From"),
+      accountCol("ToBankAccount", "To"),
       { key: "Amount", label: "Amount", type: "money" },
     ],
   },
@@ -72,6 +197,13 @@ const VIEWS: Record<string, View> = {
     columns: [
       { key: "Date", label: "Date", type: "date" },
       { key: "PaymentType", label: "Type", type: "badge" },
+      {
+        key: "Invoice.InvoiceNumber",
+        label: "Invoice",
+        link: { entity: "Invoices", idKey: "Invoice.InvoiceID" },
+      },
+      { key: "Invoice.Contact.Name", label: "Contact" },
+      accountCol("Account", "Account"),
       { key: "Amount", label: "Amount", type: "money" },
       { key: "Reference", label: "Reference" },
       { key: "Status", label: "Status", type: "badge" },
@@ -81,7 +213,7 @@ const VIEWS: Record<string, View> = {
     label: "Overpayments", idField: "OverpaymentID", dateField: "Date",
     columns: [
       { key: "Type", label: "Type", type: "badge" },
-      { key: "Contact.Name", label: "Contact" },
+      contactCol(),
       { key: "Date", label: "Date", type: "date" },
       { key: "Total", label: "Total", type: "money" },
       { key: "Status", label: "Status", type: "badge" },
@@ -91,7 +223,7 @@ const VIEWS: Record<string, View> = {
     label: "Prepayments", idField: "PrepaymentID", dateField: "Date",
     columns: [
       { key: "Type", label: "Type", type: "badge" },
-      { key: "Contact.Name", label: "Contact" },
+      contactCol(),
       { key: "Date", label: "Date", type: "date" },
       { key: "Total", label: "Total", type: "money" },
       { key: "Status", label: "Status", type: "badge" },
@@ -109,7 +241,7 @@ const VIEWS: Record<string, View> = {
     label: "Purchase Orders", idField: "PurchaseOrderID", titleField: "PurchaseOrderNumber", dateField: "Date",
     columns: [
       { key: "PurchaseOrderNumber", label: "Number" },
-      { key: "Contact.Name", label: "Contact" },
+      contactCol(),
       { key: "Date", label: "Date", type: "date" },
       { key: "Total", label: "Total", type: "money" },
       { key: "Status", label: "Status", type: "badge" },
@@ -119,7 +251,7 @@ const VIEWS: Record<string, View> = {
     label: "Quotes", idField: "QuoteID", titleField: "QuoteNumber", dateField: "Date",
     columns: [
       { key: "QuoteNumber", label: "Number" },
-      { key: "Contact.Name", label: "Contact" },
+      contactCol(),
       { key: "Date", label: "Date", type: "date" },
       { key: "Total", label: "Total", type: "money" },
       { key: "Status", label: "Status", type: "badge" },
@@ -129,7 +261,7 @@ const VIEWS: Record<string, View> = {
     label: "Receipts", idField: "ReceiptID", dateField: "Date",
     columns: [
       { key: "ReceiptNumber", label: "Number" },
-      { key: "Contact.Name", label: "Contact" },
+      contactCol(),
       { key: "Date", label: "Date", type: "date" },
       { key: "Total", label: "Total", type: "money" },
       { key: "Status", label: "Status", type: "badge" },
@@ -154,7 +286,7 @@ const VIEWS: Record<string, View> = {
     label: "Repeating Invoices", idField: "RepeatingInvoiceID",
     columns: [
       { key: "Type", label: "Type", type: "badge" },
-      { key: "Contact.Name", label: "Contact" },
+      contactCol(),
       { key: "Total", label: "Total", type: "money" },
       { key: "Status", label: "Status", type: "badge" },
     ],
@@ -176,6 +308,7 @@ const VIEWS: Record<string, View> = {
       { key: "AccountNumber", label: "Account #" },
       { key: "ContactStatus", label: "Status", type: "badge" },
     ],
+    backlinks: CONTACT_BACKLINKS,
   },
   Accounts: {
     label: "Chart of Accounts", idField: "AccountID", titleField: "Name",
@@ -185,6 +318,12 @@ const VIEWS: Record<string, View> = {
       { key: "Type", label: "Type", type: "badge" },
       { key: "Class", label: "Class" },
       { key: "Status", label: "Status", type: "badge" },
+    ],
+    // Transactions reference accounts by code on each line item.
+    backlinks: [
+      { label: "Invoices", entity: "Invoices", path: "LineItems[].AccountCode", valueKey: "Code" },
+      { label: "BankTransactions", entity: "BankTransactions", path: "LineItems[].AccountCode", valueKey: "Code" },
+      { label: "CreditNotes", entity: "CreditNotes", path: "LineItems[].AccountCode", valueKey: "Code" },
     ],
   },
   Items: {
@@ -300,6 +439,9 @@ export async function generateSite(store: Store): Promise<string> {
     },
     entities: entitiesMeta,
     reports,
+    // Shared child-table shapes: every entity's LineItems/JournalLines look alike.
+    lineItemColumns: LINE_ITEM_COLUMNS,
+    journalLineColumns: JOURNAL_LINE_COLUMNS,
   };
   await writeFile(path.join(dataOut, "manifest.json"), JSON.stringify(manifest, null, 2));
 

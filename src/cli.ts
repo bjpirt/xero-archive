@@ -25,6 +25,8 @@ async function main(): Promise<void> {
   const cmd = process.argv[2] ?? "help";
   const flags = process.argv.slice(3);
   if (flags.includes("--refresh-attachments")) CONFIG.refreshAttachments = true;
+  if (flags.includes("--skip-attachments")) CONFIG.skipAttachments = true;
+  if (flags.includes("--attachments-only")) CONFIG.attachmentsOnly = true;
 
   switch (cmd) {
     case "auth":
@@ -70,7 +72,10 @@ async function main(): Promise<void> {
           "",
           "  auth      One-time browser sign-in (PKCE); stores a refresh token",
           "  archive   Pull all data + attachments to data/ (incremental on re-run)",
-          "            add -- --refresh-attachments to re-check attachments already stored",
+          "            records first, then reports, then attachments last",
+          "            -- --skip-attachments     records/journals/reports only (cheap)",
+          "            -- --attachments-only     just the attachment pass",
+          "            -- --refresh-attachments  re-check attachments already stored",
           "  history   Backfill History & Notes for every archived document (resumable)",
           "            add -- --refresh to re-fetch all history from scratch",
           "  adopt-attachments",

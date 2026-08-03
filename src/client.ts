@@ -2,6 +2,20 @@ import { getAccessToken } from "./auth";
 import { XERO } from "./config";
 import { log } from "./log";
 
+/**
+ * Thrown to unwind cleanly when the daily API quota is spent (or within the
+ * configured buffer of it). `resetsAt` is only known when Xero actually returned a
+ * 429 with `Retry-After`: the daily window is a fixed window that resets at a
+ * tenant-specific time, so it can't be computed.
+ * https://developer.xero.com/documentation/guides/oauth2/limits
+ */
+export class DailyLimitReached extends Error {
+  constructor(readonly resetsAt: Date | null = null) {
+    super("Daily API limit reached");
+    this.name = "DailyLimitReached";
+  }
+}
+
 export class XeroHttpError extends Error {
   constructor(
     public status: number,
@@ -117,12 +131,24 @@ export async function request(
       return fetch(url, { headers });
     });
 
-    const remain = Number(res.headers.get("X-DayLimit-Remaining"));
-    if (Number.isFinite(remain)) dayLimitRemaining = Math.min(dayLimitRemaining, remain);
+    // Only trust the header when it's actually present: Number(null) is 0, which is
+    // finite, so a response without it would otherwise clamp the remaining quota to
+    // zero and abort the run as if the daily limit had been hit.
+    const remainHeader = res.headers.get("X-DayLimit-Remaining");
+    if (remainHeader !== null && remainHeader.trim() !== "") {
+      const remain = Number(remainHeader);
+      if (Number.isFinite(remain)) dayLimitRemaining = Math.min(dayLimitRemaining, remain);
+    }
 
     if (res.status === 429) {
       const retryAfter = Number(res.headers.get("Retry-After")) || 60;
       const problem = res.headers.get("X-Rate-Limit-Problem") ?? "unknown";
+      // A daily Retry-After can be many hours — sleeping it would hang the run, so
+      // stop instead and let the caller report when to come back. Xero's documented
+      // X-Rate-Limit-Problem values are "minute", "daily", "concurrent", "appminute".
+      if (/daily/i.test(problem)) {
+        throw new DailyLimitReached(new Date(Date.now() + retryAfter * 1000));
+      }
       log.warn(`429 (${problem} limit). Waiting ${retryAfter}s…`);
       await sleep((retryAfter + 1) * 1000);
       continue;

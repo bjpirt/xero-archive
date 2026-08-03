@@ -104,6 +104,9 @@ export const CONFIG = {
   // Re-list every document's attachments even when the marker says they're complete.
   // Set by `npm run archive -- --refresh-attachments` as well as the env var.
   refreshAttachments: envBool("REFRESH_ATTACHMENTS", false),
+  // Phase switches, for spreading a large archive across several daily quotas.
+  skipAttachments: envBool("SKIP_ATTACHMENTS", false),
+  attachmentsOnly: envBool("ATTACHMENTS_ONLY", false),
   includeReports: envBool("INCLUDE_REPORTS", true),
   reportPeriod: (env("REPORT_PERIOD", "year") === "month" ? "month" : "year") as
     | "year"

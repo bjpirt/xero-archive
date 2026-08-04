@@ -201,6 +201,15 @@ command (reads the org name from `raw/organisation.json`; tenantId isn't needed 
   when even `openid` alone is refused (that means the *client* is wrong, not the scopes).
   `XERO_SCOPES` pins an exact list and skips negotiation. Don't make this heuristic
   load-bearing on the happy path.
+- **Tokens are bound to the app that issued them.** API calls are authorised by the stored bearer
+  token, *not* by `XERO_CLIENT_ID` — so swapping the client id while reusing one token file would
+  keep spending the previous app's quota for the ~30 minutes the access token stays valid, then
+  fail refresh with a misleading "expired" message. `TokenSet.client_id` records the issuer and
+  `appMismatch()` refuses the mismatch; `XERO_TOKENS_FILE` gives each app its own store.
+  `client_id` is optional because token files written before this existed lack it — treat absent
+  as "can't tell, allow it", never as a failure.
+- Rate limits are per **(app, tenant)** pair, but Xero caps an organisation at **two uncertified
+  apps**, so multiple apps buy at most 2× the daily quota.
 - **Refresh tokens expire after 60 days of inactivity** → user re-runs `npm run auth`.
   Access tokens (30 min) refresh automatically mid-run (`getAccessToken()` refreshes ~60s
   before expiry and persists the rotated pair).
@@ -302,6 +311,8 @@ Never point a throwaway script at the user's real `data/` or `.tokens.json`.
   `site.ts`); the rest is driven off the catalog.
 - Touching fetch loops → write each file as it's fetched and keep `DailyLimitReached` handling
   so runs stay resumable purely from disk.
+- New `.env` settings → remember a **blank value counts as unset** in `env()`, so `FOO=` falls
+  back to the default rather than overriding it with `""`.
 - Any Xero date field → go through `parseXeroDate`. Records are stored with dates already
   converted to ISO 8601: `Store`'s writers all funnel through `normaliseDates()`, so nothing in
   `data/` keeps the `/Date(…)/` wire format. Keep new writers going through that helper, and

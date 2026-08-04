@@ -27,7 +27,9 @@ export const MASTER: Endpoint[] = [
   { name: "Contacts", path: "/Contacts", arrayKey: "Contacts", idField: "ContactID", paged: true, attachments: true, history: true, kind: "master" },
   { name: "ContactGroups", path: "/ContactGroups", arrayKey: "ContactGroups", idField: "ContactGroupID", paged: false, attachments: false, history: false, kind: "master" },
   { name: "Items", path: "/Items", arrayKey: "Items", idField: "ItemID", paged: false, attachments: false, history: true, kind: "master" },
-  { name: "TaxRates", path: "/TaxRates", arrayKey: "TaxRates", idField: "Name", paged: false, attachments: false, history: false, kind: "master" },
+  // Keyed by TaxType, not Name: TaxType is what line items reference (e.g. "INPUT2"),
+  // so it makes the id a direct link target and gives tidy filenames.
+  { name: "TaxRates", path: "/TaxRates", arrayKey: "TaxRates", idField: "TaxType", paged: false, attachments: false, history: false, kind: "master" },
   { name: "TrackingCategories", path: "/TrackingCategories", arrayKey: "TrackingCategories", idField: "TrackingCategoryID", paged: false, attachments: false, history: false, kind: "master" },
   { name: "Currencies", path: "/Currencies", arrayKey: "Currencies", idField: "Code", paged: false, attachments: false, history: false, kind: "master" },
   { name: "BrandingThemes", path: "/BrandingThemes", arrayKey: "BrandingThemes", idField: "BrandingThemeID", paged: false, attachments: false, history: false, kind: "master" },

@@ -227,6 +227,7 @@ The client-side SPA (`src/assets/app.js`) has no unit tests yet — verify the s
 |---|---|---|
 | `XERO_CLIENT_ID` | — | Your Xero app's Client ID (required) |
 | `XERO_CLIENT_SECRET` | — | Your app's secret; required for *Web app* type apps |
+| `XERO_TOKENS_FILE` | `.tokens.json` | Token store path; give each Xero app its own |
 | `XERO_SCOPES` | auto | Pin the exact scope list (space- or comma-separated), skipping negotiation |
 | `XERO_REDIRECT_URI` | `http://localhost:5173/callback` | Must match the app's registered redirect |
 | `AUTH_CALLBACK_PORT` | `5173` | Local callback port (match the redirect URI) |
@@ -238,6 +239,34 @@ The client-side SPA (`src/assets/app.js`) has no unit tests yet — verify the s
 | `REPORT_PERIOD` | `year` | `year` or `month` report granularity |
 | `REPORT_FROM_YEAR` | auto | Earliest year to snapshot reports from |
 | `DAILY_LIMIT_BUFFER` | `50` | Stop this many calls before the daily limit |
+
+### Using more than one Xero app
+
+Rate limits are per **(app, tenant)** pair, so a second app connected to the same organisation
+gets its own daily allowance. Two caveats before you rely on it: Xero
+[limits an organisation to **two uncertified apps**](https://developer.xero.com/documentation/guides/oauth2/limits),
+and its documented answer to needing more than 1,000 calls/day is to move to the Core tier.
+
+Give each app its own token file, because a refresh token is bound to the app that issued it:
+
+```bash
+# .env.app2 — that app's XERO_CLIENT_ID and XERO_CLIENT_SECRET, plus:
+XERO_TOKENS_FILE=.tokens.app2.json
+```
+
+```bash
+node --env-file=.env.app2 node_modules/.bin/tsx src/cli.ts auth
+node --env-file=.env.app2 node_modules/.bin/tsx src/cli.ts archive
+```
+
+Both apps can share one `data/` directory — resume is derived from disk, so whichever app runs
+next simply continues from what's already there.
+
+**Don't just swap `XERO_CLIENT_ID` and reuse one token file.** API calls are authorised by the
+stored bearer token, not by the configured client id, so you would keep spending the *previous*
+app's quota until the access token expired ~30 minutes later, and only then hit a confusing
+refresh failure. The token file now records which app issued it and the tool refuses a mismatch
+rather than letting that happen silently.
 
 ## Troubleshooting
 

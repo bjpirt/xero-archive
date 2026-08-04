@@ -66,12 +66,23 @@ const accountCol = (key: string, label: string): Column => ({
   link: { entity: "Accounts", idKey: `${key}.AccountID` },
 });
 
-/** Line items reference accounts by code, not id. Shared by every entity that has them. */
+/**
+ * Names resolved into child lines at generation time. Line items carry only an
+ * `AccountID`/`AccountCode` and a `TaxType`, and the browser has no way to join
+ * across entities, so `annotateChildLines` fills these in. See `buildNameLookups`.
+ */
+const RESOLVED_ACCOUNT = "_AccountName";
+const RESOLVED_TAX_RATE = "_TaxRateName";
+
 const JOURNAL_LINE_COLUMNS: Column[] = [
-  { key: "AccountCode", label: "Account", link: { entity: "Accounts", idKey: "AccountCode", by: "Code" } },
-  { key: "AccountName", label: "Name" },
+  { key: "AccountCode", label: "Code" },
+  {
+    key: "AccountName",
+    label: "Account",
+    link: { entity: "Accounts", idKey: "AccountCode", by: "Code" },
+  },
   { key: "Description", label: "Description" },
-  { key: "TaxType", label: "Tax" },
+  { key: RESOLVED_TAX_RATE, label: "Tax", link: { entity: "TaxRates", idKey: "TaxType" } },
   { key: "NetAmount", label: "Net", type: "money" },
   { key: "TaxAmount", label: "Tax", type: "money" },
   { key: "GrossAmount", label: "Gross", type: "money" },
@@ -81,11 +92,63 @@ const LINE_ITEM_COLUMNS: Column[] = [
   { key: "Description", label: "Description" },
   { key: "Quantity", label: "Qty" },
   { key: "UnitAmount", label: "Unit", type: "money" },
-  { key: "AccountCode", label: "Account", link: { entity: "Accounts", idKey: "AccountCode", by: "Code" } },
-  { key: "TaxType", label: "Tax" },
+  // Line items hold AccountID, so this links straight to the account's page.
+  { key: RESOLVED_ACCOUNT, label: "Account", link: { entity: "Accounts", idKey: "AccountID" } },
+  { key: RESOLVED_TAX_RATE, label: "Tax", link: { entity: "TaxRates", idKey: "TaxType" } },
   { key: "TaxAmount", label: "Tax amt", type: "money" },
   { key: "LineAmount", label: "Amount", type: "money" },
 ];
+
+/** Display names for the ids and codes that child lines reference. */
+export interface NameLookups {
+  accountNameById: Map<string, string>;
+  accountNameByCode: Map<string, string>;
+  taxRateNameByType: Map<string, string>;
+}
+
+export function buildNameLookups(accounts: any[], taxRates: any[]): NameLookups {
+  const lookups: NameLookups = {
+    accountNameById: new Map(),
+    accountNameByCode: new Map(),
+    taxRateNameByType: new Map(),
+  };
+  for (const account of accounts) {
+    if (!account?.Name) continue;
+    if (account.AccountID) lookups.accountNameById.set(String(account.AccountID), account.Name);
+    if (account.Code) lookups.accountNameByCode.set(String(account.Code), account.Name);
+  }
+  for (const rate of taxRates) {
+    if (rate?.TaxType && rate.Name) lookups.taxRateNameByType.set(String(rate.TaxType), rate.Name);
+  }
+  return lookups;
+}
+
+/**
+ * Resolves account and tax-rate names into a record's child lines, in place.
+ *
+ * Falls back to the raw code when a name can't be found — a partial archive should
+ * still show something useful rather than an empty cell, and `fmtCell` drops the
+ * link anyway when the target entity is absent.
+ */
+export function annotateChildLines(rec: any, lookups: NameLookups): void {
+  for (const key of ["LineItems", "JournalLines"]) {
+    const lines = rec?.[key];
+    if (!Array.isArray(lines)) continue;
+    for (const line of lines) {
+      if (!line || typeof line !== "object") continue;
+      const byId = line.AccountID ? lookups.accountNameById.get(String(line.AccountID)) : undefined;
+      const byCode = line.AccountCode
+        ? lookups.accountNameByCode.get(String(line.AccountCode))
+        : undefined;
+      const accountName = byId ?? byCode ?? line.AccountName ?? line.AccountCode;
+      if (accountName != null) line[RESOLVED_ACCOUNT] = accountName;
+
+      if (line.TaxType != null) {
+        line[RESOLVED_TAX_RATE] = lookups.taxRateNameByType.get(String(line.TaxType)) ?? line.TaxType;
+      }
+    }
+  }
+}
 
 const PAYMENT_RELATED: Related = {
   label: "Payments",
@@ -326,6 +389,22 @@ const VIEWS: Record<string, View> = {
       { label: "CreditNotes", entity: "CreditNotes", path: "LineItems[].AccountCode", valueKey: "Code" },
     ],
   },
+  TaxRates: {
+    label: "Tax Rates", idField: "TaxType", titleField: "Name",
+    columns: [
+      { key: "Name", label: "Name" },
+      { key: "TaxType", label: "Tax Type" },
+      { key: "DisplayTaxRate", label: "Rate" },
+      { key: "ReportTaxType", label: "Reporting type" },
+      { key: "Status", label: "Status", type: "badge" },
+    ],
+    // Line items reference the rate by TaxType, which is this view's id.
+    backlinks: [
+      { label: "Invoices", entity: "Invoices", path: "LineItems[].TaxType" },
+      { label: "BankTransactions", entity: "BankTransactions", path: "LineItems[].TaxType" },
+      { label: "CreditNotes", entity: "CreditNotes", path: "LineItems[].TaxType" },
+    ],
+  },
   Items: {
     label: "Items", idField: "ItemID", titleField: "Name",
     columns: [
@@ -395,6 +474,12 @@ export async function generateSite(store: Store): Promise<string> {
     ...MASTER.map((e) => ({ name: e.name, idField: e.idField, attach: e.attachments, group: "master" })),
   ];
 
+  // Read once: every entity's child lines resolve their names against these.
+  const lookups = buildNameLookups(
+    await store.readEntity("Accounts"),
+    await store.readEntity("TaxRates"),
+  );
+
   for (const e of order) {
     const records = await store.readEntity(e.name);
     if (records.length === 0) continue;
@@ -402,6 +487,7 @@ export async function generateSite(store: Store): Promise<string> {
 
     for (const rec of records) {
       const id = String(rec[e.idField] ?? "");
+      annotateChildLines(rec, lookups);
       if (e.attach) {
         const files = await store.listAttachments(e.name, id);
         if (files.length) {

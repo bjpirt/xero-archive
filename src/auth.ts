@@ -3,9 +3,11 @@ import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import path from "node:path";
 import {
   BROAD_SCOPE_ONLY,
   CONFIG,
+  ROOT,
   SCOPES,
   SCOPES_OVERRIDDEN,
   TOKENS_FILE,
@@ -20,6 +22,12 @@ export interface TokenSet {
   expires_at: number; // epoch ms
   scope: string;
   obtained_at: number; // epoch ms
+  /**
+   * The app these tokens belong to. Optional because token files written before
+   * this existed don't have it. Recorded so switching `XERO_CLIENT_ID` can't
+   * silently keep spending the previous app's quota — see `assertSameApp`.
+   */
+  client_id?: string;
 }
 
 export interface Connection {
@@ -69,6 +77,8 @@ export interface AuthDeps {
   fetch: typeof globalThis.fetch;
   now: () => number;
   tokens: TokenStore;
+  /** Only for error messages — the store itself may not be file-backed. */
+  tokensFile: string;
   /** Opens the consent URL; a no-op is fine, the URL is always printed too. */
   openBrowser: (url: string) => void;
 }
@@ -105,14 +115,35 @@ export function tokenAuth(
 }
 
 /** Xero access tokens live 30 min; refresh 60s early to be safe. */
-export function toTokenSet(raw: any, now: number): TokenSet {
+export function toTokenSet(raw: any, now: number, clientId = CONFIG.clientId): TokenSet {
   return {
     access_token: raw.access_token,
     refresh_token: raw.refresh_token,
     expires_at: now + (Number(raw.expires_in) - 60) * 1000,
     scope: raw.scope ?? SCOPES,
     obtained_at: now,
+    ...(clientId ? { client_id: clientId } : {}),
   };
+}
+
+/**
+ * Refuses tokens issued to a different Xero app.
+ *
+ * API calls are authorised by the bearer token, not by `XERO_CLIENT_ID` — so
+ * changing the client id in `.env` while keeping the same token file would keep
+ * spending the *previous* app's daily quota until the access token expired, then
+ * fail refresh with a misleading "expired" message. Returns null when there's
+ * nothing to compare (a token file predating `client_id`, or no app configured).
+ */
+export function appMismatch(tokens: TokenSet, clientId: string, file: string): string | null {
+  if (!tokens.client_id || !clientId || tokens.client_id === clientId) return null;
+  const short = (id: string) => `${id.slice(0, 8)}…`;
+  return (
+    `${file} holds tokens for Xero app ${short(tokens.client_id)}, but XERO_CLIENT_ID is ` +
+    `${short(clientId)}. API calls are authorised by the stored token, so continuing would ` +
+    `spend the other app's daily quota. Run \`npm run auth\` to authorise this app, or set ` +
+    "XERO_TOKENS_FILE to give each app its own token file."
+  );
 }
 
 function openBrowserDefault(url: string): void {
@@ -138,6 +169,7 @@ export class XeroAuth {
       fetch: deps.fetch ?? globalThis.fetch,
       now: deps.now ?? Date.now,
       tokens: deps.tokens ?? fileTokenStore(),
+      tokensFile: deps.tokensFile ?? TOKENS_FILE,
       openBrowser: deps.openBrowser ?? openBrowserDefault,
     };
   }
@@ -214,7 +246,14 @@ export class XeroAuth {
 
   /** Returns a valid access token, refreshing (and rotating) if at/near expiry. */
   async getAccessToken(): Promise<string> {
-    this.cached ??= await this.deps.tokens.read();
+    if (!this.cached) {
+      const stored = await this.deps.tokens.read();
+      if (stored) {
+        const mismatch = appMismatch(stored, CONFIG.clientId, this.deps.tokensFile);
+        if (mismatch) throw new Error(mismatch);
+      }
+      this.cached = stored;
+    }
     if (!this.cached) throw new Error("Not authorised yet. Run `npm run auth` first.");
     if (this.deps.now() >= this.cached.expires_at) {
       log.info("Access token expired; refreshing…");
@@ -299,7 +338,7 @@ export class XeroAuth {
       throw new Error(`Token exchange failed (${res.status}): ${await res.text()}`);
     }
     await this.deps.tokens.write(toTokenSet(await res.json(), this.deps.now()));
-    log.ok("Authorised. Tokens saved to .tokens.json");
+    log.ok(`Authorised. Tokens saved to ${path.relative(ROOT, this.deps.tokensFile)}`);
   }
 
   /** Spins up a throwaway server on the callback port and resolves with the code. */

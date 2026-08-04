@@ -3,7 +3,8 @@
     "allow": [
       "Bash(grep -E \"✖ |ℹ \\(tests|pass|fail\\)|duration_ms [0-9]{4,}\")",
       "Bash(npm run *)",
-      "Bash(npx tsx *)"
+      "Bash(npx tsx *)",
+      "Bash(XERO_TOKENS_FILE=\"\" npx tsx -e 'import {TOKENS_FILE} from \"./src/config\"; console.log\\(JSON.stringify\\(TOKENS_FILE\\)\\)')"
     ]
   }
 }

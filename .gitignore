@@ -1,6 +1,9 @@
 node_modules/
 .env
-.tokens.json
+.env.*
+!.env.example
+# .tokens.json plus any per-app variants pointed at by XERO_TOKENS_FILE
+.tokens*.json
 data/
 site/
 *.log

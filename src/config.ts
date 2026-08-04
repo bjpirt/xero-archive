@@ -11,7 +11,6 @@ export const ROOT = path.resolve(__dirname, "..");
 
 export const DATA_DIR = path.join(ROOT, "data");
 export const SITE_DIR = path.join(ROOT, "site");
-export const TOKENS_FILE = path.join(ROOT, ".tokens.json");
 
 /** Xero OAuth 2.0 + API endpoints. */
 export const XERO = {
@@ -70,8 +69,15 @@ const DEFAULT_SCOPES = [...GRANULAR_SCOPES, ...LEGACY_SCOPES];
 /** Endpoints that only the deprecated broad transactions scope can reach. */
 export const BROAD_SCOPE_ONLY = ["Receipts", "ExpenseClaims"];
 
+/**
+ * A blank value counts as unset. `.env` files habitually carry empty keys
+ * (`XERO_SCOPES=`), and without this a blank would win over the default — which
+ * made `XERO_TOKENS_FILE=` resolve to the project directory rather than
+ * `.tokens.json`.
+ */
 function env(name: string, fallback = ""): string {
-  return process.env[name]?.trim() ?? fallback;
+  const raw = process.env[name]?.trim();
+  return raw ? raw : fallback;
 }
 
 function envBool(name: string, fallback: boolean): boolean {
@@ -86,6 +92,14 @@ function envInt(name: string, fallback: number): number {
   const n = Number.parseInt(v, 10);
   return Number.isFinite(n) ? n : fallback;
 }
+
+/**
+ * Where the rotating refresh token lives. Configurable because a refresh token is
+ * bound to the client that issued it: two Xero apps sharing one token file would
+ * clobber each other, forcing a browser re-auth on every switch. Relative paths
+ * resolve against the project root.
+ */
+export const TOKENS_FILE = path.resolve(ROOT, env("XERO_TOKENS_FILE", ".tokens.json"));
 
 /** An explicit `XERO_SCOPES` (whitespace/comma separated) is used verbatim. */
 export const SCOPES_OVERRIDDEN = env("XERO_SCOPES") !== "";

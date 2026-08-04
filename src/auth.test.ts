@@ -1,8 +1,13 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { setSilent } from "./log";
 import {
   XeroAuth,
+  appMismatch,
+  fileTokenStore,
   memoryTokenStore,
   scopeHint,
   toTokenSet,
@@ -239,6 +244,110 @@ describe("getConnections", () => {
       fetch: (async () => new Response("nope", { status: 401 })) as typeof fetch,
     });
     await assert.rejects(() => auth.getConnections(), /GET \/connections failed \(401\)/);
+  });
+});
+
+describe("appMismatch", () => {
+  const tokensFor = (clientId?: string): TokenSet => ({
+    access_token: "a",
+    refresh_token: "r",
+    expires_at: 0,
+    scope: "openid",
+    obtained_at: 0,
+    ...(clientId ? { client_id: clientId } : {}),
+  });
+
+  test("passes when the token was issued to the configured app", () => {
+    assert.equal(appMismatch(tokensFor(CLIENT_ID), CLIENT_ID, ".tokens.json"), null);
+  });
+
+  test("explains the clash when the app differs", () => {
+    const message = appMismatch(tokensFor("AAAAAAAA1111"), "BBBBBBBB2222", ".tokens.json");
+    assert.ok(message, "expected a mismatch message");
+    assert.match(message, /AAAAAAAA…/);
+    assert.match(message, /BBBBBBBB…/);
+    assert.match(message, /XERO_TOKENS_FILE/);
+    assert.doesNotMatch(message, /AAAAAAAA1111/, "shouldn't echo the whole id");
+  });
+
+  test("stays quiet for a token file written before client_id was recorded", () => {
+    // Existing users' .tokens.json has no client_id; failing would break them.
+    assert.equal(appMismatch(tokensFor(undefined), CLIENT_ID, ".tokens.json"), null);
+  });
+
+  test("stays quiet when no app is configured, having nothing to compare", () => {
+    assert.equal(appMismatch(tokensFor(CLIENT_ID), "", ".tokens.json"), null);
+  });
+});
+
+describe("token/app binding", () => {
+  test("toTokenSet records which app issued the tokens", () => {
+    const set = toTokenSet({ access_token: "a", refresh_token: "r", expires_in: 60 }, 0, CLIENT_ID);
+    assert.equal(set.client_id, CLIENT_ID);
+  });
+
+  test("omits client_id entirely when none is configured", () => {
+    const set = toTokenSet({ access_token: "a", refresh_token: "r", expires_in: 60 }, 0, "");
+    assert.ok(!("client_id" in set));
+  });
+
+  test("getAccessToken refuses another app's tokens instead of spending its quota", async () => {
+    const auth = new XeroAuth({
+      tokens: memoryTokenStore({
+        access_token: "belongs-to-app-1",
+        refresh_token: "r",
+        expires_at: Number.MAX_SAFE_INTEGER, // still valid: the silent-failure window
+        scope: "openid",
+        obtained_at: 0,
+        client_id: "SOMEOTHERAPPID",
+      }),
+      tokensFile: "/tmp/.tokens.json",
+    });
+    await assert.rejects(() => auth.getAccessToken(), /holds tokens for Xero app/);
+  });
+
+  test("a legacy token file without client_id still works", async () => {
+    const auth = new XeroAuth({
+      tokens: memoryTokenStore({
+        access_token: "legacy",
+        refresh_token: "r",
+        expires_at: Number.MAX_SAFE_INTEGER,
+        scope: "openid",
+        obtained_at: 0,
+      }),
+      now: () => 0,
+    });
+    assert.equal(await auth.getAccessToken(), "legacy");
+  });
+});
+
+describe("fileTokenStore", () => {
+  test("round-trips through a file, readable only by the owner", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "xero-archive-tokens-"));
+    try {
+      const file = path.join(dir, ".tokens.json");
+      const store = fileTokenStore(file);
+      assert.equal(await store.read(), null, "no file yet");
+
+      const set = toTokenSet({ access_token: "a", refresh_token: "r", expires_in: 1800 }, 0, CLIENT_ID);
+      await store.write(set);
+      assert.deepEqual(await store.read(), set);
+      // The refresh token is a credential: 600, not world-readable.
+      assert.equal((await stat(file)).mode & 0o777, 0o600);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("treats a corrupt file as 'not authorised' rather than crashing", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "xero-archive-tokens-"));
+    try {
+      const file = path.join(dir, ".tokens.json");
+      await writeFile(file, "{ not json");
+      assert.equal(await fileTokenStore(file).read(), null);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 

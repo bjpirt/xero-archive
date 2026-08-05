@@ -259,13 +259,18 @@ New behaviour needs a test that would fail without it.
 Tests live beside their subject as `src/*.test.ts`. Coverage sits around 96% of lines;
 `npm run test:coverage` prints the table.
 
+**`src/assets/app.test.ts` runs the real SPA**, not a reimplementation of it: it loads
+`src/assets/app.js` into a stub DOM under `node:vm` (no browser, no dependencies) and points its
+`fetch` at a site produced by the real `generateSite`. That covers the generator→client contract
+neither side's unit tests can reach — two shipped bugs lived exactly there. When changing the SPA,
+add a case here and confirm it fails without the fix.
+
 What's deliberately **not** covered, and why:
 
 - `XeroAuth.login()`'s callback server and browser launch — needs a real socket and a browser.
   Everything it depends on (scope negotiation, `tokenAuth`, `toTokenSet`, `scopeHint`) is tested.
-- `site.ts` and `src/assets/app.js` — the client-side SPA has no unit tests yet. Extracting its
-  pure view-model logic (formatting, pagination maths, link resolution, hash parsing) into an
-  importable module is the intended next step; until then verify the site by hand.
+- CSS, and anything needing real layout or click events — the stub DOM makes event wiring a no-op,
+  so row-click navigation and the rows-per-page control are unverified.
 - `serve.ts` — verify the path guard by hand (see below).
 
 Regressions worth keeping tests for, because each was a real bug: the `X-DayLimit-Remaining`
@@ -305,9 +310,14 @@ compare dates format-agnostically so pre-migration markers still match.
   `generateSite`. Beware which fields Xero actually sends: manual journal lines carry no
   `AccountName` (unlike Journals'), and a Payment's nested `Account` has no `Name` at all — both
   looked like empty columns until resolved.
-- The detail page substitutes a resolved name **in place of** the raw id it came from, so a record
-  that's mostly GUIDs reads like its list row. `_`-prefixed fields stay hidden there unless the
-  view declares them as a column (or the resolution carries its own `label`/`link`).
+- The detail page renders the view's **columns first, in declared order**, then the remaining
+  fields; it substitutes a resolved name **in place of** the raw id it came from, and hides the
+  record's own `idField` (that names the page). `_`-prefixed fields stay hidden unless the view
+  declares them as a column, or the resolution carries its own `label`/`link`. Every resolved
+  field must render through `columnRow()` — going via the generic renderer loses the label and
+  the link, which shipped as a bug twice.
+- Booleans render as **Yes/No** everywhere via `fmtCell`; don't let a raw `true`/`false` reach a
+  badge.
 - List views paginate via `?p=` / `?size=`; `parseHash`/`hashFor`/`withParams` in `app.js` own
   the query string, so add new list state as a param rather than module-level state.
 - Editing the SPA: change `src/assets/app.js` / `style.css` (the source of truth). `site.ts`

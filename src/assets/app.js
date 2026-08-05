@@ -92,6 +92,7 @@
     PAID: "ok", AUTHORISED: "ok", ACTIVE: "ok", ACCEPTED: "ok", RECONCILED: "ok",
     DRAFT: "muted", SUBMITTED: "warn", AWAITING_APPROVAL: "warn", SENT: "warn",
     VOIDED: "bad", DELETED: "bad", ARCHIVED: "bad", DECLINED: "bad", GST_ERROR: "bad",
+    Yes: "ok", No: "muted",
   };
   function label(v) {
     var s = String(v);
@@ -124,6 +125,8 @@
 
   function fmtCell(val, col, rec) {
     if (val == null || val === "") return "";
+    // Booleans read as Yes/No wherever they appear — a badge saying "true" is noise.
+    if (typeof val === "boolean") val = val ? "Yes" : "No";
     var type = col && col.type;
     var html;
     if (type === "date") html = esc(fmtDate(val));
@@ -594,8 +597,9 @@
       /** Renders one row using a column's label and link, so cells match the list. */
       function columnRow(key) {
         consumed[key] = true;
+        consumed[key.split(".")[0]] = true; // a dot path stands in for its parent object
         var col = columnFor[key] || { key: key };
-        var value = rec[key];
+        var value = getPath(rec, key);
         if (value == null || value === "") return null;
         return (
           "<dt>" + esc(col.label || humanKey(key)) + "</dt><dd>" + fmtCell(value, col, rec) + "</dd>"
@@ -603,24 +607,37 @@
       }
 
       var rows = [];
+      // The view's own columns first, in declared order: the fields worth showing in
+      // the list are the ones that matter most on a single record too.
+      (meta.view.columns || []).forEach(function (c) {
+        if (consumed[c.key]) return;
+        var columnsRow = columnRow(c.key);
+        if (columnsRow) rows.push(columnsRow);
+      });
+
       Object.keys(rec).forEach(function (k) {
-        if (HIDE[k]) return;
+        if (HIDE[k] || consumed[k]) return;
+        // The record's own id names the page; it isn't a useful field. A view that
+        // wants it visible (TaxRates' TaxType) declares it as a column, handled above.
+        if (k === meta.view.idField) return;
 
         // Resolved fields are internal unless the view shows them, and when it does
         // they must render through their column — that's what gives them a readable
         // label instead of "_ContactName" and makes them links.
         if (k.charAt(0) === "_") {
-          if (!columnFor[k] || consumed[k]) return;
+          if (!columnFor[k]) return;
           var resolvedRow = columnRow(k);
           if (resolvedRow) rows.push(resolvedRow);
           return;
         }
 
         var resolvedKey = resolvedFor[k];
-        if (resolvedKey && !consumed[resolvedKey]) {
-          // Show the name in the raw id's place; the id itself adds nothing.
-          var substituted = columnRow(resolvedKey);
-          if (substituted) rows.push(substituted);
+        if (resolvedKey) {
+          // Show the name in the raw id's place; the id itself adds nothing either way.
+          if (!consumed[resolvedKey]) {
+            var substituted = columnRow(resolvedKey);
+            if (substituted) rows.push(substituted);
+          }
           return;
         }
         // Xero sends DateString alongside Date; now dates are stored as ISO the

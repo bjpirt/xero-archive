@@ -203,8 +203,10 @@ clock and token provider; `XeroAuth` takes a `TokenStore` (so tests never touch 
 backoffs get exercised in milliseconds. `cli.ts` is the only place real dependencies are wired
 together.
 
-The client-side SPA (`src/assets/app.js`) has no unit tests yet — verify the site by hand with
-`npm run serve`.
+The client-side SPA is tested too: `src/assets/app.test.ts` loads the real `app.js` into a stub
+DOM under `node:vm` and points its `fetch` at output from the real site generator, so page
+rendering, links and pagination are checked without a browser. Click behaviour and CSS still need
+an eye — `npm run serve`.
 
 ## Notes & limitations
 

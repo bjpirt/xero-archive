@@ -110,6 +110,7 @@
   function humanKey(k) {
     if (KEY_LABELS[k]) return KEY_LABELS[k];
     return k
+      .replace(/^_+/, "") // generated fields are prefixed; never show that to a reader
       .replace(/UTC$/, "")
       .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
       .replace(/^./, function (c) {
@@ -566,10 +567,62 @@
       var title = meta.view.titleField ? rec[meta.view.titleField] : rec[meta.view.idField];
 
       // Fields the view already highlights, or that are noise on a detail page.
-      var HIDE = { HasErrors: 1, HasValidationErrors: 1, HasAttachments: 1, IsDiscounted: 1, ValidationErrors: 1 };
+      var HIDE = {
+        HasErrors: 1, HasValidationErrors: 1, HasAttachments: 1, HasAccount: 1,
+        IsDiscounted: 1, ValidationErrors: 1,
+      };
+
+      // Columns the view declares, so the detail page can borrow their labels and links.
+      var columnFor = {};
+      (meta.view.columns || []).forEach(function (c) {
+        columnFor[c.key] = c;
+      });
+      // Ids the generator resolved to names: show the name in the id's place, so a
+      // record that's mostly GUIDs reads the same way its list row does.
+      var resolvedFor = {};
+      (meta.view.resolve || []).forEach(function (r) {
+        if (r.inArray || rec[r.into] == null) return;
+        resolvedFor[r.from] = r.into;
+        // A resolution may describe its own label and link, for fields worth showing
+        // on a single record but not worth a column in the list.
+        if (!columnFor[r.into] && (r.label || r.link)) {
+          columnFor[r.into] = { key: r.into, label: r.label, link: r.link };
+        }
+      });
+      var consumed = {};
+
+      /** Renders one row using a column's label and link, so cells match the list. */
+      function columnRow(key) {
+        consumed[key] = true;
+        var col = columnFor[key] || { key: key };
+        var value = rec[key];
+        if (value == null || value === "") return null;
+        return (
+          "<dt>" + esc(col.label || humanKey(key)) + "</dt><dd>" + fmtCell(value, col, rec) + "</dd>"
+        );
+      }
+
       var rows = [];
       Object.keys(rec).forEach(function (k) {
-        if (k.charAt(0) === "_" || HIDE[k]) return;
+        if (HIDE[k]) return;
+
+        // Resolved fields are internal unless the view shows them, and when it does
+        // they must render through their column — that's what gives them a readable
+        // label instead of "_ContactName" and makes them links.
+        if (k.charAt(0) === "_") {
+          if (!columnFor[k] || consumed[k]) return;
+          var resolvedRow = columnRow(k);
+          if (resolvedRow) rows.push(resolvedRow);
+          return;
+        }
+
+        var resolvedKey = resolvedFor[k];
+        if (resolvedKey && !consumed[resolvedKey]) {
+          // Show the name in the raw id's place; the id itself adds nothing.
+          var substituted = columnRow(resolvedKey);
+          if (substituted) rows.push(substituted);
+          return;
+        }
         // Xero sends DateString alongside Date; now dates are stored as ISO the
         // companion adds nothing.
         if (/String$/.test(k) && rec[k.replace(/String$/, "")] != null) return;

@@ -291,6 +291,23 @@ compare dates format-agnostically so pre-migration markers still match.
   right, e.g. an invoice's `Payments`) and `backlinks` (the reverse direction, rendered as
   `?link=<path>:<value>` filters — `[]` in the path marks an array hop). `app.js` silently drops
   any link whose target entity wasn't archived, so a partial archive still renders.
+- **Xero records are full of bare GUIDs and missing display names**, and the browser can't join
+  across entities — so `site.ts` resolves them at generation time into `_`-prefixed fields that
+  columns then read. Two declarative hooks on a view, both applied in `generateSite`:
+  - `resolve: [{ into, from, using, inArray?, label?, link? }]` — `from` is a dot path holding an
+    id, `using` names a map in `NameLookups` (`accountName`, `taxRateName`, `invoiceNumber`,
+    `contactName`, `batchLabel`), `inArray` resolves inside a child array. **No fallback to the
+    raw id on purpose**: an empty cell makes `childTable` drop the column, which beats a column
+    of GUIDs. `label`/`link` let the detail page render a field that isn't worth a list column.
+  - `computed: [{ into, from[], separator? }]` — joins fields on the same record, e.g. Users have
+    no single `Name`, only `FirstName`/`LastName`.
+  Add a new lookup by extending `NameLookups` + `SourceRecords` and reading that entity in
+  `generateSite`. Beware which fields Xero actually sends: manual journal lines carry no
+  `AccountName` (unlike Journals'), and a Payment's nested `Account` has no `Name` at all — both
+  looked like empty columns until resolved.
+- The detail page substitutes a resolved name **in place of** the raw id it came from, so a record
+  that's mostly GUIDs reads like its list row. `_`-prefixed fields stay hidden there unless the
+  view declares them as a column (or the resolution carries its own `label`/`link`).
 - List views paginate via `?p=` / `?size=`; `parseHash`/`hashFor`/`withParams` in `app.js` own
   the query string, so add new list state as a param rather than module-level state.
 - Editing the SPA: change `src/assets/app.js` / `style.css` (the source of truth). `site.ts`

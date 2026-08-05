@@ -173,9 +173,16 @@ command (reads the org name from `raw/organisation.json`; tenantId isn't needed 
   `daily`, which does **not** contain the substring "day" — match it carefully.
 - **Attachments:** list via `GET /{Entity}/{id}/Attachments` (only when the record's
   `HasAttachments === true`), download the raw bytes via
-  `GET /{Entity}/{id}/Attachments/{filename}` with `Accept: */*`. There is no bulk listing, so
+  `GET /{Entity}/{id}/Attachments/{AttachmentID}` with `Accept: */*`. There is no bulk listing, so
   the list call is one per attachment-bearing document — the dominant cost on a re-run, hence
   the `_attachments` marker.
+- **Fetch attachments by `AttachmentID`, never by filename.** Xero cannot serve attachments whose
+  filename contains `+` or `%` — verified against the live API: our `encodeURIComponent` URL, a
+  double-encoded variant, **and the `Url` Xero itself returns in the list response** all 404,
+  while the same file by id returns 200. Of 2,018 archived attachments, 49 have such names and
+  every one of them failed this way. `fetchAttachmentBytes()` uses the id and falls back to the
+  filename only on a 404, because retrieval by id is undocumented (only
+  `Attachments/{Filename}` appears in Xero's docs).
 - **History has no bulk endpoint** — one call per document. That's why it's off by default in
   the main archive and lives in the separate resumable `npm run history` pass.
 

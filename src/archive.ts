@@ -329,13 +329,9 @@ export class Archiver {
           names.push(att.FileName);
           if (store.hasAttachment(ep.name, id, att.FileName)) continue; // already on disk
           log.progress(`${at} — downloading ${att.FileName}${this.client.apiUsage()}`);
-          const bin = await this.client.request(
-            store.tenantId,
-            `/${ep.name}/${id}/Attachments/${encodeURIComponent(att.FileName)}`,
-            { accept: "binary" },
-          );
-          if (bin.buffer) {
-            await store.writeAttachment(ep.name, id, att.FileName, bin.buffer);
+          const bytes = await this.fetchAttachmentBytes(store.tenantId, ep.name, id, att);
+          if (bytes) {
+            await store.writeAttachment(ep.name, id, att.FileName, bytes);
             files++;
           }
         }
@@ -355,6 +351,43 @@ export class Archiver {
       `${ep.name}: attachments done — ${todo.length} doc(s) checked, ${files} new file(s)` +
         `${skipped ? `, ${skipped} already complete` : ""}${this.client.apiUsage()}`,
     );
+  }
+
+  /**
+   * Fetches one attachment's bytes, addressing it by `AttachmentID` rather than by
+   * filename.
+   *
+   * Xero cannot serve attachments whose filename contains `+` or `%` — verified
+   * against the live API, where our encoding, a double-encoded variant, *and the
+   * `Url` Xero itself returns in the list response* all 404, while the same file
+   * fetched by id returns 200. A GUID has no encoding hazards at all.
+   *
+   * Retrieval by id isn't in Xero's docs (only `Attachments/{Filename}` is), so fall
+   * back to the filename if the id 404s. Returns null when neither works, leaving the
+   * document without a marker so a later run retries it.
+   */
+  private async fetchAttachmentBytes(
+    tenantId: string,
+    entity: string,
+    docId: string,
+    att: { AttachmentID?: string; FileName?: string },
+  ): Promise<Buffer | null> {
+    const keys = [att.AttachmentID, att.FileName].filter((k): k is string => Boolean(k));
+    for (const [index, key] of keys.entries()) {
+      const isLast = index === keys.length - 1;
+      try {
+        const res = await this.client.request(
+          tenantId,
+          `/${entity}/${docId}/Attachments/${encodeURIComponent(key)}`,
+          { accept: "binary" },
+        );
+        return res.buffer;
+      } catch (e) {
+        if (isLast || !(e instanceof XeroHttpError) || e.status !== 404) throw e;
+        log.warn(`${entity}/${docId}: "${att.FileName}" not found by id — trying filename`);
+      }
+    }
+    return null;
   }
 
   /**

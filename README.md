@@ -284,6 +284,12 @@ To work out which scope is at fault by hand, request them one at a time against
 `https://login.xero.com/identity/connect/authorize`: a scope Xero accepts redirects to its
 sign-in page, while a rejected one redirects to `/identity/error`.
 
+**Attachments reported as 404 and skipped**
+Fixed. Xero can't serve an attachment by filename when the name contains `+` or `%` — not even
+using the URL Xero itself returns in the attachment list. Downloads now address attachments by
+`AttachmentID` instead, which has no such problem. A document whose attachments failed has no
+`_attachments` marker, so simply re-running picks it up.
+
 **Entities skipped with a 403 during the archive**
 The scope that covers them isn't assigned to your app. Two gaps are expected on a granular-only
 app: **Receipts** and **Expense Claims** have no granular scope at all — only the deprecated

@@ -23,7 +23,7 @@ type Call =
   | { kind: "journals" }
   | { kind: "report" }
   | { kind: "attach-list"; entity: string; id: string }
-  | { kind: "attach-file"; entity: string; id: string }
+  | { kind: "attach-file"; entity: string; id: string; key: string }
   | { kind: "history"; entity: string; id: string };
 
 interface Fixture {
@@ -57,7 +57,7 @@ function build(fixture: Fixture = {}, options: Partial<ArchiveOptions> = {}) {
     if (parts[0] === "Reports") return { kind: "report" };
     if (parts[2] === "Attachments") {
       return parts.length > 3
-        ? { kind: "attach-file", entity: parts[0], id: parts[1] }
+        ? { kind: "attach-file", entity: parts[0], id: parts[1], key: decodeURIComponent(parts[3]) }
         : { kind: "attach-list", entity: parts[0], id: parts[1] };
     }
     if (parts[2] === "history") return { kind: "history", entity: parts[0], id: parts[1] };
@@ -74,7 +74,8 @@ function build(fixture: Fixture = {}, options: Partial<ArchiveOptions> = {}) {
         return { Reports: [{ ReportName: "R" }] };
       case "attach-list":
         return {
-          Attachments: (fixture.attachments?.[`${call.entity}/${call.id}`] ?? []).map((f) => ({
+          Attachments: (fixture.attachments?.[`${call.entity}/${call.id}`] ?? []).map((f, i) => ({
+            AttachmentID: `att-${i}`,
             FileName: f,
           })),
         };
@@ -257,6 +258,65 @@ describe("attachment de-duplication", () => {
     });
     await archiver.run();
     assert.equal(store().hasAttachmentIndex("Invoices", "inv-1"), false);
+  });
+});
+
+describe("attachment addressing", () => {
+  // Xero can't serve attachments whose filename contains "+" or "%" — not even via
+  // the Url it generates itself. Fetching by AttachmentID avoids the whole problem.
+  const AWKWARD = "Receipt Sun Sep 21 2014 11:00:40 GMT+0100 (BST).pdf";
+  const fixture = {
+    records: { Invoices: [INVOICE_WITH_ATTACHMENT] },
+    attachments: { "Invoices/inv-1": [AWKWARD] },
+  };
+
+  test("downloads by AttachmentID, not by filename", async () => {
+    const { archiver, calls } = build(fixture);
+    await archiver.run();
+    const download = calls.find((c) => c.kind === "attach-file");
+    assert.equal(download?.kind === "attach-file" && download.key, "att-0");
+  });
+
+  test("stores the file under its real name even though it was fetched by id", async () => {
+    const { archiver, store } = build(fixture);
+    await archiver.run();
+    // safeName replaces the colons; "+" and brackets are safe on disk.
+    assert.deepEqual(await store().listAttachments("Invoices", "inv-1"), [
+      "Receipt_Sun_Sep_21_2014_11_00_40_GMT+0100_(BST).pdf",
+    ]);
+    assert.ok(store().hasAttachmentIndex("Invoices", "inv-1"));
+  });
+
+  test("falls back to the filename when the id 404s", async () => {
+    // Retrieval by id is undocumented, so a 404 there must not lose the file.
+    const { archiver, calls, store } = build({
+      ...fixture,
+      status: (call) => (call.kind === "attach-file" && call.key === "att-0" ? 404 : undefined),
+    });
+    await archiver.run();
+    const keys = calls.filter((c) => c.kind === "attach-file").map((c) => (c as any).key);
+    assert.deepEqual(keys, ["att-0", AWKWARD], "id first, then the filename");
+    assert.equal((await store().listAttachments("Invoices", "inv-1")).length, 1);
+  });
+
+  test("when neither works, no marker is written so a later run retries", async () => {
+    const { archiver, store } = build({
+      ...fixture,
+      status: (call) => (call.kind === "attach-file" ? 404 : undefined),
+    });
+    await archiver.run();
+    assert.equal(store().hasAttachmentIndex("Invoices", "inv-1"), false);
+  });
+
+  test("a non-404 error is not retried under a different key", async () => {
+    const { archiver, calls } = build({
+      ...fixture,
+      status: (call) => (call.kind === "attach-file" ? 500 : undefined),
+    });
+    await archiver.run();
+    // 500s are retried by the client itself; the fallback is only for a genuine 404.
+    const keys = new Set(calls.filter((c) => c.kind === "attach-file").map((c) => (c as any).key));
+    assert.deepEqual([...keys], ["att-0"]);
   });
 });
 
